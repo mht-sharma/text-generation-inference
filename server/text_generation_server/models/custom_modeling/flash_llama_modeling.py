@@ -235,6 +235,7 @@ class FlashLlamaAttention(torch.nn.Module):
                 block_tables,
                 input_lengths,
                 max_s,
+                num_kv_heads=self.num_key_value_heads,
             )
 
         return self.o_proj(
@@ -557,6 +558,7 @@ class FlashLlamaForCausalLM(torch.nn.Module):
         adapter_data: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         inputs_embeds = self.embed_tokens(input_ids)
+
         hidden_states = self.model(
             inputs_embeds,
             position_ids,
