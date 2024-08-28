@@ -125,6 +125,7 @@ RUN pip uninstall -y triton && \
 RUN git clone --depth 1 --recursive --single-branch --branch main https://github.com/pytorch/pytorch.git pytorch && \
     cd pytorch && git fetch --depth 1 origin da320214e66b5af0f7db8fd18a64dbb519d17b27 && \
     git checkout da320214e66b5af0f7db8fd18a64dbb519d17b27 && \
+    git submodule update --init --recursive && \
     pip install -r requirements.txt --no-cache-dir
 
 ARG _GLIBCXX_USE_CXX11_ABI="1"
