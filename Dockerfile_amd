@@ -41,7 +41,7 @@ COPY launcher launcher
 RUN cargo build --profile release-opt
 
 # Text Generation Inference base image for RoCm
-FROM rocm/dev-ubuntu-22.04:6.2 AS base
+FROM rocm/pytorch:rocm6.2_ubuntu22.04_py3.10_pytorch_release_2.3.0 AS base
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential \
@@ -55,20 +55,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     llvm-dev \
     g++ \
     # Needed to build VLLM & flash.
-    rocthrust-dev \
-    hipsparse-dev \
-    hipblas-dev \
-    hipcub-dev \
-    rocblas-dev \
-    hiprand-dev \
-    hipfft-dev \
-    rocrand-dev \
-    miopen-hip-dev \
-    hipsolver-dev \
-    rccl-dev \
-    cmake \
-    python3.11-dev \
-    python3.11-venv && \
+    cmake && \
     rm -rf /var/lib/apt/lists/*
 
 # Keep in sync with `server/pyproject.toml
@@ -96,7 +83,8 @@ RUN case ${TARGETPLATFORM} in \
     esac && \
     curl -fsSL -v -o ~/mambaforge.sh -O  "https://github.com/conda-forge/miniforge/releases/download/${MAMBA_VERSION}/Mambaforge-${MAMBA_VERSION}-Linux-${MAMBA_ARCH}.sh"
 RUN chmod +x ~/mambaforge.sh && \
-    bash ~/mambaforge.sh -b -p /opt/conda && \
+    rm -rf /opt/conda && \
+    bash ~/mambaforge.sh -u -b -p /opt/conda && \
     mamba init && \
     rm ~/mambaforge.sh
 
@@ -113,28 +101,30 @@ RUN case ${TARGETPLATFORM} in \
 # Install flash-attention, torch dependencies
 RUN pip install numpy einops ninja joblib msgpack --no-cache-dir
 
-# Install HIPBLASLt
-ARG HIPBLASLT_BRANCH="6f65c6e"
-RUN git clone https://github.com/ROCm/hipBLASLt \
-    && cd hipBLASLt \
-    && git checkout ${HIPBLASLT_BRANCH} \
-    && SCCACHE_IDLE_TIMEOUT=1800 ./install.sh --architecture ${PYTORCH_ROCM_ARCH} \
-    && cd build/release \
-    && make package
-RUN dpkg -i hipBLASLt/build/release/*.deb \
-    && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
-    && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status \
-    && rm -rf hipBLASLt
+ARG RCCL_BRANCH="rocm-6.2.0"
+RUN git clone https://github.com/ROCm/rccl \
+    && cd rccl \
+    && git checkout ${RCCL_BRANCH} \
+    && ./install.sh -p --amdgpu_targets ${PYTORCH_ROCM_ARCH}
+RUN dpkg -i rccl/build/release/*.deb \
+    # RCCL needs to be installed twice
+    && dpkg -i rccl/build/release/*.deb \
+    && sed -i 's/, rccl-dev \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status \
+    && sed -i 's/, rccl \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status;
 
-RUN pip uninstall -y triton && \
-    git clone --depth 1 --single-branch https://github.com/ROCm/triton.git && \
-    cd triton/python && \
-    pip install .
+ARG TRITON_BRANCH="e192dba"
+ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
+RUN pip uninstall triton -y
+RUN python3 -m pip install ninja cmake wheel pybind11 && git clone ${TRITON_REPO} \
+    && cd triton \
+    && git checkout ${TRITON_BRANCH} \
+    && MAX_JOBS=16 pip install -e python
 
-ARG PYTORCH_COMMIT="da320214e66b5af0f7db8fd18a64dbb519d17b27"
-RUN git clone --depth 1 --recursive --single-branch --branch main https://github.com/pytorch/pytorch.git pytorch && \
-    cd pytorch && git fetch --depth 1 origin ${PYTORCH_COMMIT} && \
-    git checkout  ${PYTORCH_COMMIT} && \
+ARG PYTORCH_BRANCH="cedc116"
+RUN rm -rf pytorch
+RUN git clone https://github.com/ROCm/pytorch.git pytorch && \
+    cd pytorch && \
+    git checkout  ${PYTORCH_BRANCH} && \
     git submodule update --init --recursive && \
     pip install -r requirements.txt --no-cache-dir
 
@@ -153,13 +143,38 @@ ARG BUILD_CAFFE2="0" \
     USE_MEM_EFF_ATTENTION="0"
 
 RUN cd pytorch && python tools/amd_build/build_amd.py && python setup.py install
+RUN rm -r pytorch
+RUN conda install mkl=2021
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib/:/opt/conda/lib/python3.11/site-packages/torch/lib:/opt/conda/lib/
 
-# Set AS recommended: https://github.com/ROCm/triton/wiki/A-script-to-set-program-execution-environment-in-ROCm
-ENV HIP_FORCE_DEV_KERNARG=1
-
-# On MI250 and MI300, performances for flash with Triton FA are slightly better than CK.
-# However, Triton requires a tunning for each prompt length, which is prohibitive.
-ENV ROCM_USE_FLASH_ATTN_V2_TRITON=0
+RUN cd /opt/rocm/share/amd_smi \
+    && pip install .
+# RUN rm -rf vision
+# ARG PYTORCH_VISION_BRANCH="v0.19.1"
+# ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
+# RUN  git clone ${PYTORCH_VISION_REPO} vision \
+#     && cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
+#     && python3 setup.py bdist_wheel --dist-dir=dist && pip install dist/*.whl
+# ARG HIPBLAS_COMMON_BRANCH="086a3fb"
+# RUN git clone https://github.com/ROCm/hipBLAS-common.git && \
+#     cd hipBLAS-common && \
+#     git checkout ${HIPBLAS_COMMON_BRANCH} && \
+#     mkdir build && \
+#     cd build && \
+#     cmake .. && \
+#     make -j$(nproc) package install
+# Install HIPBLASLt
+# ARG HIPBLASLT_BRANCH="e6da924"
+# RUN git clone https://github.com/ROCm/hipBLASLt \
+#     && cd hipBLASLt \
+#     && git checkout ${HIPBLASLT_BRANCH} \
+#     && SCCACHE_IDLE_TIMEOUT=1800 ./install.sh --architecture ${PYTORCH_ROCM_ARCH} --legacy_hipblas_direct \
+#     && cd build/release \
+#     && make package
+# RUN dpkg -i hipBLASLt/build/release/*.deb \
+#     && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
+#     && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status \
+#     && rm -rf hipBLASLt
 
 FROM base AS kernel-builder
 
@@ -251,12 +266,19 @@ ENTRYPOINT ["./entrypoint.sh"]
 # Final image
 FROM base-copy
 
+# Set AS recommended: https://github.com/ROCm/triton/wiki/A-script-to-set-program-execution-environment-in-ROCm
+ENV HIP_FORCE_DEV_KERNARG=1
+
+# On MI250 and MI300, performances for flash with Triton FA are slightly better than CK.
+# However, Triton requires a tunning for each prompt length, which is prohibitive.
+ENV ROCM_USE_FLASH_ATTN_V2_TRITON=0
 ENV ROCM_USE_CUSTOM_PAGED_ATTN=1
 ENV PYTORCH_TUNABLEOP_TUNING_AFTER_WARMUP=0
 ENV VLLM_MOE_PADDING=0
 ENV ATTENTION=paged
 ENV USE_PREFIX_CACHING=0
 ENV ROCM_USE_SKINNY_GEMM=1
+
 
 COPY ./tgi-entrypoint.sh /tgi-entrypoint.sh
 RUN chmod +x /tgi-entrypoint.sh
